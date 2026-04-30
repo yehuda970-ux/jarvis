@@ -347,7 +347,7 @@ body::after{content:'';position:fixed;inset:0;background:radial-gradient(ellipse
         <div class="vtranscript" id="vtranscript"></div>
         <div class="irow">
           <button class="vbtn" id="vbtn" onclick="toggleVoice()">🎤</button>
-          <textarea class="cta" id="chat-input" placeholder="Awaiting your directive, sir..." rows="1"></textarea>
+          <textarea class="cta" id="chat-input" placeholder='Type here or say "Hey JARVIS" to speak...' rows="1"></textarea>
           <button class="sbtn" id="sbtn" onclick="sendMessage()">SEND</button>
         </div>
         <div class="ctrl">
@@ -400,35 +400,21 @@ function initVoiceEngine(){
   const load=()=>{
     const voices=synth.getVoices();
     if(!voices.length)return;
-
-    // Male voices only — filter out anything with female indicators
-    const male=voices.filter(v=>{
-      const n=v.name.toLowerCase();
-      return !n.includes('female')&&!n.includes('woman')&&!n.includes('girl')&&
-             !n.includes('zira')&&!n.includes('samantha')&&!n.includes('victoria')&&
-             !n.includes('karen')&&!n.includes('moira')&&!n.includes('tessa')&&
-             !n.includes('fiona')&&!n.includes('veena')&&!n.includes('sara')&&
-             !n.includes('siri')&&!n.includes('allison')&&!n.includes('ava')&&
-             !n.includes('susan')&&!n.includes('kate')&&!n.includes('nicky');
-    });
-
-    const pick=(arr)=>{
-      return arr.find(v=>v.name==='Daniel')||
-             arr.find(v=>v.name.includes('Daniel'))||
-             arr.find(v=>v.name.includes('George'))||
-             arr.find(v=>v.name.includes('Google UK English Male'))||
-             arr.find(v=>v.name.includes('Ryan'))||
-             arr.find(v=>v.lang==='en-GB')||
-             arr.find(v=>v.name==='Alex')||
-             arr.find(v=>v.lang.startsWith('en-'))||
-             arr[0]||null;
-    };
-
-    selectedVoice=pick(male)||pick(voices);
+    const FEMALE=['zira','samantha','victoria','karen','moira','tessa','fiona','veena','sara','allison','ava','susan','kate','nicky','female','woman','girl'];
+    const male=voices.filter(v=>!FEMALE.some(f=>v.name.toLowerCase().includes(f)));
+    selectedVoice=
+      male.find(v=>v.name==='Daniel')||
+      male.find(v=>v.name.includes('Daniel'))||
+      male.find(v=>v.name.includes('George'))||
+      male.find(v=>v.name.includes('Google UK English Male'))||
+      male.find(v=>v.name.includes('Ryan'))||
+      male.find(v=>v.lang==='en-GB')||
+      male.find(v=>v.name==='Alex')||
+      male.find(v=>v.lang.startsWith('en'))||
+      voices[0]||null;
     const vname=selectedVoice?selectedVoice.name:'DEFAULT';
-    document.getElementById('voice-info').textContent=`VOICE ENGINE: ${vname.toUpperCase()}`;
+    document.getElementById('voice-info').textContent=`VOICE: ${vname.toUpperCase()}`;
   };
-
   synth.onvoiceschanged=load;
   load();
 }
@@ -465,25 +451,15 @@ function preprocessForSpeech(text){
 function speakJarvis(text){
   if(!ttsEnabled||!synth)return;
   synth.cancel();
-  const clean=preprocessForSpeech(text);
+  const clean=text.replace(/<[^>]+>/g,'').replace(/\*+/g,'').replace(/\[TASKS:[\s\S]*?\]/g,'').replace(/\n+/g,' ').trim().substring(0,600);
   if(!clean)return;
   const utt=new SpeechSynthesisUtterance(clean);
   if(selectedVoice)utt.voice=selectedVoice;
-  utt.pitch=0.9;
-  utt.rate=0.88;
+  utt.pitch=1.0;
+  utt.rate=0.9;
   utt.volume=0.92;
-  utt.onstart=()=>{
-    isSpeaking=true;
-    const b=document.getElementById('vbtn');
-    b.classList.remove('listening');b.classList.add('speaking');b.textContent='🔊';
-    showVS('speaking','J.A.R.V.I.S. SPEAKING...');
-  };
-  utt.onend=utt.onerror=()=>{
-    isSpeaking=false;
-    const b=document.getElementById('vbtn');
-    b.classList.remove('speaking');b.textContent='🎤';
-    hideVS();
-  };
+  utt.onstart=()=>{isSpeaking=true;const b=document.getElementById('vbtn');b.classList.remove('listening');b.classList.add('speaking');b.textContent='🔊';showVS('speaking','J.A.R.V.I.S. SPEAKING...');};
+  utt.onend=utt.onerror=()=>{isSpeaking=false;const b=document.getElementById('vbtn');b.classList.remove('speaking');b.textContent='🎤';hideVS();};
   synth.speak(utt);
 }
 
@@ -498,6 +474,8 @@ function boot(){
   if(k){apiKey=k;document.getElementById('api-modal').classList.add('hidden');loadMemory();}
   switchTab('chat');
   initWeather();
+  // Start wake word listener after short delay
+  setTimeout(startWakeWordListener,2000);
 }
 
 function initWithKey(){
@@ -547,15 +525,36 @@ function animateGauge(pct){
 }
 
 // ══════════════════════════════════════════════════════
-// WEATHER
+// WEATHER — Open-Meteo free, IP fallback if GPS denied
 // ══════════════════════════════════════════════════════
 async function initWeather(){
+  let lat,lon,city='UNKNOWN';
   try{
-    const pos=await new Promise((res,rej)=>navigator.geolocation.getCurrentPosition(res,rej,{timeout:8000}));
-    const {latitude:lat,longitude:lon}=pos.coords;
-    const geo=await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lon}&format=json`).then(r=>r.json());
-    const city=geo.address.city||geo.address.town||geo.address.village||geo.address.county||'UNKNOWN';
-    document.getElementById('wx-loc').textContent=city.toUpperCase();
+    // Try GPS first
+    const pos=await new Promise((res,rej)=>navigator.geolocation.getCurrentPosition(res,rej,{timeout:6000,maximumAge:300000}));
+    lat=pos.coords.latitude;lon=pos.coords.longitude;
+    try{
+      const geo=await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lon}&format=json`).then(r=>r.json());
+      city=(geo.address.city||geo.address.town||geo.address.village||geo.address.county||'UNKNOWN').toUpperCase();
+    }catch(e){}
+  }catch(e){
+    // GPS denied — fall back to IP geolocation (free)
+    try{
+      const ip=await fetch('https://ipapi.co/json/').then(r=>r.json());
+      lat=ip.latitude;lon=ip.longitude;
+      city=(ip.city||ip.region||'UNKNOWN').toUpperCase();
+    }catch(e2){
+      document.getElementById('wx-icon').textContent='📡';
+      document.getElementById('wx-temp').textContent='--°';
+      document.getElementById('wx-desc').textContent='UNAVAILABLE';
+      document.getElementById('wx-loc').textContent='LOCATION DENIED';
+      return;
+    }
+  }
+
+  document.getElementById('wx-loc').textContent=city;
+
+  try{
     const wx=await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current_weather=true&temperature_unit=fahrenheit`).then(r=>r.json());
     const w=wx.current_weather;
     const icons={0:'☀️',1:'🌤️',2:'⛅',3:'☁️',45:'🌫️',48:'🌫️',51:'🌦️',53:'🌦️',55:'🌧️',61:'🌧️',63:'🌧️',65:'🌧️',71:'🌨️',73:'🌨️',75:'❄️',80:'🌦️',81:'🌧️',82:'⛈️',95:'⛈️',99:'⛈️'};
@@ -564,15 +563,14 @@ async function initWeather(){
     document.getElementById('wx-temp').textContent=Math.round(w.temperature)+'°F';
     document.getElementById('wx-desc').textContent=descs[w.weathercode]||'UNKNOWN';
   }catch(e){
-    document.getElementById('wx-icon').textContent='📡';
+    document.getElementById('wx-icon').textContent='🌡️';
     document.getElementById('wx-temp').textContent='--°';
-    document.getElementById('wx-desc').textContent='LOCATION DENIED';
-    document.getElementById('wx-loc').textContent='ENABLE LOCATION';
+    document.getElementById('wx-desc').textContent='WEATHER UNAVAILABLE';
   }
 }
 
 // ══════════════════════════════════════════════════════
-// WEB SEARCH
+// WEB SEARCH — Wikipedia API (more reliable than DDG)
 // ══════════════════════════════════════════════════════
 async function doWebSearch(query){
   const input=document.getElementById('search-input');
@@ -581,24 +579,40 @@ async function doWebSearch(query){
   input.value='';
   document.getElementById('search-status').textContent='SCANNING...';
   try{
-    const data=await fetch(`https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_redirect=1&no_html=1&skip_disambig=1`).then(r=>r.json());
-    let result='';
-    if(data.AbstractText)result=data.AbstractText;
-    else if(data.Answer)result=data.Answer;
-    else if(data.Definition)result=data.Definition;
-    else if(data.RelatedTopics&&data.RelatedTopics.length>0)result=data.RelatedTopics.slice(0,2).map(t=>t.Text).filter(Boolean).join(' ');
+    // Try Wikipedia first — most reliable free API
+    const wikiUrl=`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(query)}`;
+    const wikiResp=await fetch(wikiUrl);
+    if(wikiResp.ok){
+      const wikiData=await wikiResp.json();
+      if(wikiData.extract&&wikiData.type!=='disambiguation'){
+        document.getElementById('search-status').textContent='RESULTS ACQUIRED';
+        const reply=`Intelligence scan complete, sir. Regarding "${query}":\n\n${wikiData.extract}`;
+        renderMsg('jarvis',reply);
+        messages.push({role:'assistant',content:reply});
+        msgCount++;updateMsgStats();saveMemory();
+        if(ttsEnabled)setTimeout(()=>speakJarvis(wikiData.extract.substring(0,400)),150);
+        scrollChat();return;
+      }
+    }
+    // Fallback: DuckDuckGo
+    const ddgUrl=`https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_redirect=1&no_html=1&skip_disambig=1`;
+    const ddgData=await fetch(ddgUrl).then(r=>r.json());
+    const result=ddgData.AbstractText||ddgData.Answer||ddgData.Definition||
+      (ddgData.RelatedTopics||[]).slice(0,2).map(t=>t.Text).filter(Boolean).join(' ');
     if(result){
       document.getElementById('search-status').textContent='RESULTS ACQUIRED';
       const reply=`Intelligence scan complete, sir. Regarding "${query}":\n\n${result}`;
-      renderMsg('jarvis',reply);messages.push({role:'assistant',content:reply});msgCount++;updateMsgStats();saveMemory();
-      if(ttsEnabled)setTimeout(()=>speakJarvis(reply),150);
+      renderMsg('jarvis',reply);
+      messages.push({role:'assistant',content:reply});
+      msgCount++;updateMsgStats();saveMemory();
+      if(ttsEnabled)setTimeout(()=>speakJarvis(result.substring(0,400)),150);
     }else{
-      document.getElementById('search-status').textContent='NO DIRECT RESULTS';
-      renderMsg('jarvis',`I was unable to retrieve a direct result for "${query}", sir. You may wish to refine the search term.`);
+      document.getElementById('search-status').textContent='NO RESULTS';
+      renderMsg('jarvis',`I was unable to retrieve a result for "${query}", sir. Try a more specific term.`);
     }
   }catch(e){
     document.getElementById('search-status').textContent='SCAN FAILED';
-    renderMsg('jarvis','Intelligence scan failed, sir. A network disruption appears to be the cause.');
+    renderMsg('jarvis',`Intelligence scan failed, sir. Network disruption detected.`);
   }
   scrollChat();
 }
@@ -668,14 +682,47 @@ function updateTTSUI(){
 }
 
 // ══════════════════════════════════════════════════════
-// VOICE INPUT
+// WAKE WORD + VOICE INPUT
 // ══════════════════════════════════════════════════════
+let wakeRecognition=null;
+let wakeActive=false;
+
+function startWakeWordListener(){
+  const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+  if(!SR)return;
+  wakeRecognition=new SR();
+  wakeRecognition.continuous=true;
+  wakeRecognition.interimResults=false;
+  wakeRecognition.lang='en-US';
+  wakeRecognition.onresult=(e)=>{
+    const t=e.results[e.results.length-1][0].transcript.toLowerCase().trim();
+    if((t.includes('hey jarvis')||t.includes('hey travis')||t.includes('a jarvis'))&&!isListening&&!isSpeaking){
+      // Wake word detected — activate mic
+      wakeRecognition.stop();
+      setTimeout(()=>toggleVoice(),300);
+    }
+  };
+  wakeRecognition.onend=()=>{
+    // Restart wake listener unless full dictation is active
+    if(!isListening)setTimeout(()=>{try{wakeRecognition.start();}catch(e){}},500);
+  };
+  try{wakeRecognition.start();wakeActive=true;}catch(e){}
+}
+
 function initRec(){
   const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
   if(!SR)return null;
   const r=new SR();
   r.continuous=true;r.interimResults=true;r.lang='en-US';r.maxAlternatives=1;
-  r.onstart=()=>{isListening=true;recBuffer='';const b=document.getElementById('vbtn');b.classList.add('listening');b.textContent='⏺';showVS('listening','LISTENING... SAY "SEND" TO SUBMIT');document.getElementById('vtranscript').classList.add('show');};
+  r.onstart=()=>{
+    isListening=true;recBuffer='';
+    // Stop wake word listener while dictating
+    if(wakeRecognition)try{wakeRecognition.stop();}catch(e){}
+    const b=document.getElementById('vbtn');
+    b.classList.add('listening');b.textContent='⏺';
+    showVS('listening','LISTENING... SAY "SEND" TO SUBMIT');
+    document.getElementById('vtranscript').classList.add('show');
+  };
   r.onresult=(e)=>{
     let interim='',final='';
     for(let i=e.resultIndex;i<e.results.length;i++){const t=e.results[i][0].transcript;e.results[i].isFinal?final+=t:interim+=t;}
@@ -696,17 +743,24 @@ function initRec(){
   r.onend=()=>{if(isListening)try{r.start();}catch(e){}};
   return r;
 }
+
 function stopListening(send){
-  isListening=false;if(recognition)try{recognition.stop();}catch(e){}
-  const b=document.getElementById('vbtn');b.classList.remove('listening');b.textContent='🎤';
-  hideVS();document.getElementById('vtranscript').classList.remove('show');
+  isListening=false;
+  if(recognition)try{recognition.stop();}catch(e){}
+  const b=document.getElementById('vbtn');
+  b.classList.remove('listening');b.textContent='🎤';
+  hideVS();
+  document.getElementById('vtranscript').classList.remove('show');
+  // Restart wake word listener
+  setTimeout(()=>{if(wakeActive)try{wakeRecognition.start();}catch(e){}},800);
   if(send&&document.getElementById('chat-input').value.trim())sendMessage();
 }
+
 function toggleVoice(){
   if(isSpeaking){synth&&synth.cancel();isSpeaking=false;document.getElementById('vbtn').classList.remove('speaking');document.getElementById('vbtn').textContent='🎤';hideVS();return;}
   if(isListening){stopListening(false);return;}
   if(!recognition)recognition=initRec();
-  if(!recognition){appendSys('VOICE RECOGNITION UNAVAILABLE — USE CHROME OR EDGE.');return;}
+  if(!recognition){appendSys('VOICE RECOGNITION UNAVAILABLE — USE CHROME OR SAFARI.');return;}
   try{recognition.start();}catch(e){}
 }
 function showVS(mode,text){const b=document.getElementById('vstatus');b.className='vstatus show'+(mode==='speaking'?' sp':'');document.getElementById('vstatustxt').textContent=text;}
