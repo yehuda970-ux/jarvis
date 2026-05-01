@@ -274,16 +274,19 @@ body::after{content:'';position:fixed;inset:0;background:radial-gradient(ellipse
     <label class="mlabel">GROQ API KEY</label>
     <input class="minput" id="api-key-input" type="password" placeholder="gsk_..." autocomplete="off" spellcheck="false"/>
     <div class="merr" id="key-error">INVALID KEY — MUST START WITH gsk_</div>
+    <div style="margin-top:12px;">
+    <label class="mlabel">TAVILY API KEY <span style="color:var(--muted);font-size:7px;">(OPTIONAL — REAL-TIME WEB ACCESS)</span></label>
+    <input class="minput" id="tavily-key-input" type="password" placeholder="tvly-..." autocomplete="off" spellcheck="false"/>
+    </div>
     <button class="mbtn" onclick="initWithKey()">ENGAGE SYSTEMS</button>
     <hr class="mdiv">
     <ul class="msteps">
-      <li>Visit <a href="https://console.groq.com" target="_blank">console.groq.com</a> — sign up free</li>
-      <li>No credit card required</li>
-      <li>Go to API Keys → Create API Key</li>
-      <li>Paste it above (starts with gsk_)</li>
+      <li>Groq: <a href="https://console.groq.com" target="_blank">console.groq.com</a> — free, no card</li>
+      <li>Tavily: <a href="https://tavily.com" target="_blank">tavily.com</a> — free 1000 searches/mo</li>
+      <li>Both keys stored locally only</li>
     </ul>
     <hr class="mdiv">
-    <div class="mnote">Key stored locally in your browser only.</div>
+    <div class="mnote">Tavily gives JARVIS live internet access for current events, news, scores and more.</div>
   </div>
 </div>
 
@@ -481,7 +484,7 @@ body::after{content:'';position:fixed;inset:0;background:radial-gradient(ellipse
 // ══════════════════════════════════════════════════════
 // STATE
 // ══════════════════════════════════════════════════════
-let apiKey='',tasks=[],messages=[],timers=[],reminders=[],currentFilter='all',msgCount=0;
+let apiKey='',tavilyKey='',tasks=[],messages=[],timers=[],reminders=[],currentFilter='all',msgCount=0;
 let isLoading=false,ttsEnabled=false,isListening=false,isSpeaking=false;
 let recognition=null,recBuffer='',wakeRecognition=null,wakeActive=false,silenceTimer=null;
 let selectedVoice=null;
@@ -505,8 +508,32 @@ function initVoiceEngine(){
   synth.onvoiceschanged=load;load();
 }
 
+// ── iOS AUDIO UNLOCK ──────────────────────────────────
+// Safari blocks auto-play until the user has tapped once.
+// We fire a silent utterance on first touch to unlock it,
+// then all subsequent speakJarvis() calls work automatically.
+let audioUnlocked=false;
+let pendingSpeech=null;
+
+function unlockAudio(){
+  if(audioUnlocked||!synth)return;
+  const silent=new SpeechSynthesisUtterance('');
+  silent.volume=0;
+  silent.onend=()=>{
+    audioUnlocked=true;
+    // If a response was queued while locked, play it now
+    if(pendingSpeech){speakJarvis(pendingSpeech);pendingSpeech=null;}
+  };
+  synth.speak(silent);
+}
+// Unlock on any first interaction
+document.addEventListener('touchstart',unlockAudio,{once:true});
+document.addEventListener('click',unlockAudio,{once:true});
+
 function speakJarvis(text){
   if(!ttsEnabled||!synth)return;
+  // If audio not yet unlocked, queue the speech and wait
+  if(!audioUnlocked){pendingSpeech=text;return;}
   synth.cancel();
   const clean=text.replace(/<[^>]+>/g,'').replace(/\*+/g,'').replace(/\[TASKS:[\s\S]*?\]/g,'').replace(/\n+/g,' ').trim().substring(0,600);
   if(!clean)return;
@@ -609,6 +636,8 @@ function boot(){
   animateGauge(97);
   initVoiceEngine();
   const k=localStorage.getItem('jarvis_groq_key');
+  const tv=localStorage.getItem('jarvis_tavily_key');
+  if(tv)tavilyKey=tv;
   if(k){apiKey=k;document.getElementById('api-modal').classList.add('hidden');loadMemory();}
   switchTab('chat');
   initWeather();
@@ -616,15 +645,26 @@ function boot(){
   setInterval(checkReminders,30000);
   setTimeout(startWakeWordListener,2500);
   requestNotificationPermission();
+  updateWebStatus();
 }
 
 function initWithKey(){
   const v=document.getElementById('api-key-input').value.trim();
   if(!v||!v.startsWith('gsk_')){document.getElementById('api-key-input').classList.add('err');document.getElementById('key-error').classList.add('show');return;}
   apiKey=v;localStorage.setItem('jarvis_groq_key',v);
-  document.getElementById('api-modal').classList.add('hidden');loadMemory();
+  const tv=document.getElementById('tavily-key-input').value.trim();
+  if(tv){tavilyKey=tv;localStorage.setItem('jarvis_tavily_key',tv);}
+  document.getElementById('api-modal').classList.add('hidden');
+  loadMemory();updateWebStatus();
 }
 document.getElementById('api-key-input').addEventListener('keydown',e=>{if(e.key==='Enter')initWithKey();document.getElementById('api-key-input').classList.remove('err');document.getElementById('key-error').classList.remove('show');});
+
+function updateWebStatus(){
+  const el=document.getElementById('hstatus');
+  if(el)el.innerHTML=tavilyKey
+    ?'<div class="dot"></div>ONLINE · <span style="color:var(--green);font-size:7px;">WEB ●</span>'
+    :'<div class="dot"></div>ALL SYSTEMS NOMINAL';
+}
 
 function requestNotificationPermission(){
   if('Notification' in window&&Notification.permission==='default')Notification.requestPermission();
@@ -843,8 +883,25 @@ async function initWeather(){
 }
 
 // ══════════════════════════════════════════════════════
-// WEB SEARCH — Wikipedia + DDG fallback
+// WEB SEARCH — Tavily (real-time) → Wikipedia → DDG
 // ══════════════════════════════════════════════════════
+async function tavilySearch(query){
+  if(!tavilyKey)return null;
+  try{
+    const resp=await fetch('https://api.tavily.com/search',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({api_key:tavilyKey,query,search_depth:'basic',max_results:3,include_answer:true})
+    });
+    const data=await resp.json();
+    if(data.answer)return data.answer;
+    if(data.results&&data.results.length>0){
+      return data.results.slice(0,2).map(r=>r.content||r.title).join(' ');
+    }
+  }catch(e){}
+  return null;
+}
+
 async function doWebSearch(query){
   const input=document.getElementById('search-input');
   if(!query)query=input.value.trim();
@@ -852,6 +909,18 @@ async function doWebSearch(query){
   input.value='';
   document.getElementById('search-status').textContent='SCANNING...';
   try{
+    // Try Tavily first (real-time)
+    if(tavilyKey){
+      const tvResult=await tavilySearch(query);
+      if(tvResult){
+        document.getElementById('search-status').textContent='RESULTS ACQUIRED';
+        const reply=`Intelligence scan complete, sir. Regarding "${query}":\n\n${tvResult}`;
+        renderMsg('jarvis',reply);messages.push({role:'assistant',content:reply});msgCount++;updateMsgStats();saveMemory();
+        if(ttsEnabled)speakJarvis(tvResult.substring(0,400));
+        scrollChat();return;
+      }
+    }
+    // Fallback: Wikipedia
     const wikiResp=await fetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(query)}`);
     if(wikiResp.ok){
       const d=await wikiResp.json();
@@ -859,19 +928,26 @@ async function doWebSearch(query){
         document.getElementById('search-status').textContent='RESULTS ACQUIRED';
         const reply=`Intelligence scan complete, sir. Regarding "${query}":\n\n${d.extract}`;
         renderMsg('jarvis',reply);messages.push({role:'assistant',content:reply});msgCount++;updateMsgStats();saveMemory();
-        if(ttsEnabled)setTimeout(()=>speakJarvis(d.extract.substring(0,400)),150);
+        if(ttsEnabled)speakJarvis(d.extract.substring(0,400));
         scrollChat();return;
       }
     }
+    // Fallback: DDG
     const ddg=await fetch(`https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_redirect=1&no_html=1&skip_disambig=1`).then(r=>r.json());
     const result=ddg.AbstractText||ddg.Answer||ddg.Definition||(ddg.RelatedTopics||[]).slice(0,2).map(t=>t.Text).filter(Boolean).join(' ');
     if(result){
       document.getElementById('search-status').textContent='RESULTS ACQUIRED';
       const reply=`Intelligence scan complete, sir. Regarding "${query}":\n\n${result}`;
       renderMsg('jarvis',reply);messages.push({role:'assistant',content:reply});msgCount++;updateMsgStats();saveMemory();
-      if(ttsEnabled)setTimeout(()=>speakJarvis(result.substring(0,400)),150);
-    }else{document.getElementById('search-status').textContent='NO RESULTS';renderMsg('jarvis',`No direct result found for "${query}", sir. Try a more specific term.`);}
-  }catch(e){document.getElementById('search-status').textContent='SCAN FAILED';renderMsg('jarvis','Intelligence scan failed, sir. Network disruption detected.');}
+      if(ttsEnabled)speakJarvis(result.substring(0,400));
+    }else{
+      document.getElementById('search-status').textContent='NO RESULTS';
+      renderMsg('jarvis',`No direct result found for "${query}", sir. Try a more specific term.`);
+    }
+  }catch(e){
+    document.getElementById('search-status').textContent='SCAN FAILED';
+    renderMsg('jarvis','Intelligence scan failed, sir. Network disruption detected.');
+  }
   scrollChat();
 }
 document.getElementById('search-input').addEventListener('keydown',e=>{if(e.key==='Enter')doWebSearch();});
@@ -1098,12 +1174,23 @@ async function sendMessage(){
   try{
     const taskList=tasks.length>0?'\n\nCURRENT TASK MANIFEST:\n'+tasks.map((t,i)=>`${i+1}. [${t.done?'COMPLETE':'ACTIVE'}][${t.priority.toUpperCase()}] ${t.text}`).join('\n'):'\n\nCURRENT TASK MANIFEST: Empty.';
     const timerList=timers.filter(t=>!t.done).length>0?'\nACTIVE TIMERS: '+timers.filter(t=>!t.done).map(t=>t.label+' ('+formatTime(t.remaining)+' left)').join(', '):'';
+
+    // Auto Tavily search for real-time queries
+    let webContext='';
+    if(tavilyKey){
+      const needsWeb=/news|today|current|latest|right now|score|weather|stock|price|who is|what is|when is|happened|update|2024|2025|2026/i.test(text);
+      if(needsWeb){
+        const tvResult=await tavilySearch(text);
+        if(tvResult)webContext=`\n\nREAL-TIME WEB DATA (use this to answer):\n${tvResult}`;
+      }
+    }
+
     const system=`You are J.A.R.V.I.S. (Just A Rather Very Intelligent System), Tony Stark's AI from Iron Man. Calm, precise, British wit. Say "sir" occasionally. Concise — 1-3 sentences max unless detail is essential. Never say "Certainly!", "Sure!", "Absolutely!". Do things immediately, don't promise to do them.
 
 TASK AUTO-ADD: When user mentions something to do, end response with: [TASKS:[{"text":"description","priority":"high|med|low"}]]
-${taskList}${timerList}
+${taskList}${timerList}${webContext}
 
-CAPABILITIES: Any topic — science, history, coding, writing, analysis, strategy. No real-time internet access. Direct searches to Intelligence Scan panel.`;
+${webContext?'You have real-time web data above — use it to give a current, accurate answer.':'You have no real-time internet access unless web data is provided above.'}`;
     const resp=await fetch('https://api.groq.com/openai/v1/chat/completions',{
       method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+apiKey},
       body:JSON.stringify({model:'llama-3.3-70b-versatile',max_tokens:400,temperature:0.45,messages:[{role:'system',content:system},...messages.slice(-22)]})
@@ -1116,7 +1203,7 @@ CAPABILITIES: Any topic — science, history, coding, writing, analysis, strateg
     messages.push({role:'assistant',content:reply});msgCount++;updateMsgStats();
     document.getElementById('typing-msg').classList.remove('show');
     renderMsg('jarvis',reply);saveMemory();
-    if(ttsEnabled)setTimeout(()=>speakJarvis(reply),150);
+    if(ttsEnabled)speakJarvis(reply);
   }catch(err){
     document.getElementById('typing-msg').classList.remove('show');
     let msg='Connectivity disruption detected, sir. Please verify your network.';
